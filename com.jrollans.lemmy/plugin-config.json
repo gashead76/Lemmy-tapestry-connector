@@ -7,7 +7,7 @@
 	"site_placeholder": "https://lemmy.world",
 	"site_help": "Base URL of the Lemmy instance your account lives on.",
 	"item_style": "post",
-	"default_color": "teal",
+	"default_color": "green",
 	"version": 2,
 	"minimum_app_version": "2.0",
 	"needs_verification": true,
