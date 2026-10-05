@@ -1,0 +1,54 @@
+{
+	"items": [
+		{
+			"id": "upvote",
+			"name": "Upvote",
+			"icon": "arrow.up.circle",
+			"semantic": "favorite"
+		},
+		{
+			"id": "downvote",
+			"name": "Downvote",
+			"icon": "arrow.down.circle"
+		},
+		{
+			"id": "clear_vote",
+			"name": "Remove Vote",
+			"icon": "xmark.circle",
+			"priority": "secondary"
+		},
+		{
+			"id": "comment",
+			"name": "Comment",
+			"icon": "arrow.turn.up.left",
+			"role": "compose",
+			"semantic": "reply"
+		},
+		{
+			"id": "reply",
+			"name": "Reply",
+			"icon": "arrow.turn.up.left",
+			"role": "compose",
+			"semantic": "reply"
+		},
+		{
+			"id": "thread",
+			"name": "Thread",
+			"icon": "bubble.left.and.bubble.right",
+			"role": "context"
+		},
+		{
+			"id": "thread_replies",
+			"name": "Thread",
+			"icon": "bubble.left.and.text.bubble.right",
+			"role": "context"
+		}
+	],
+	"drafts": [
+		{
+			"id": "send_comment",
+			"name": "Post",
+			"icon": "paperplane"
+		}
+	]
+}

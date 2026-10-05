@@ -1,0 +1,36 @@
+{
+	"inputs": [
+		{
+			"name": "username",
+			"type": "text",
+			"prompt": "Username or Email",
+			"placeholder": "your_username"
+		},
+		{
+			"name": "password",
+			"type": "text",
+			"prompt": "Password",
+			"placeholder": "Stored on this device only"
+		},
+		{
+			"name": "sort",
+			"type": "choices",
+			"prompt": "Sort",
+			"value": "New",
+			"choices": "New,Active,Hot,TopDay,TopWeek"
+		},
+		{
+			"name": "pages",
+			"type": "choices",
+			"prompt": "Pages per refresh (50 posts each)",
+			"value": "2",
+			"choices": "1,2,3,5"
+		},
+		{
+			"name": "showNsfw",
+			"type": "switch",
+			"prompt": "Show NSFW posts",
+			"value": "off"
+		}
+	]
+}
