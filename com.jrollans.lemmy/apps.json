@@ -3,13 +3,13 @@
 		{
 			"id": "com.hanners.Mlem",
 			"name": "Mlem",
-			"template": "mlem://__URL__",
+			"template": "mlem://__HOST_PATH__",
 			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
 		},
 		{
 			"id": "com.arctic.lemmy",
 			"name": "Arctic",
-			"template": "arctic://__URL__",
+			"template": "arctic://__HOST_PATH__",
 			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
 		},
 		{
