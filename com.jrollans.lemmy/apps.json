@@ -1,0 +1,10 @@
+{
+	"apps": [
+		{
+			"id": "com.hanners.Mlem",
+			"name": "Mlem",
+			"template": "mlem://__URL__",
+			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
+		}
+	]
+}
