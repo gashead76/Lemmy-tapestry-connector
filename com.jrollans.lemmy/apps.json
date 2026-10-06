@@ -5,6 +5,18 @@
 			"name": "Mlem",
 			"template": "mlem://__URL__",
 			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
+		},
+		{
+			"id": "com.arctic.lemmy",
+			"name": "Arctic",
+			"template": "arctic://__URL__",
+			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
+		},
+		{
+			"id": "app.vger.voyager",
+			"name": "Voyager",
+			"template": "vger://__HOST_PATH__",
+			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
 		}
 	]
 }
