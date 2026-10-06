@@ -9,7 +9,7 @@
 		{
 			"id": "com.arctic.lemmy",
 			"name": "Arctic",
-			"template": "arctic://__HOST_PATH__",
+			"template": "arctic://__URL_ENCODED__",
 			"pattern": "https://([^:/\\s]+)/(post|comment|c|u)/"
 		},
 		{
