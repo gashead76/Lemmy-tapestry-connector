@@ -31,6 +31,12 @@
 			"type": "switch",
 			"prompt": "Show NSFW posts",
 			"value": "off"
+		},
+		{
+			"name": "showInbox",
+			"type": "switch",
+			"prompt": "Include replies & private messages",
+			"value": "off"
 		}
 	]
 }

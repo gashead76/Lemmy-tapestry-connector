@@ -11,6 +11,10 @@
 //   - Voting on comments, and replying to comments, using the same action ids
 //     as posts. Items carry metadata.kind ("post" or "comment") so
 //     performAction knows which Lemmy endpoint to call.
+//   - Bookmarking (Lemmy "save") of posts and comments, with the standard
+//     Tapestry "keep" gesture.
+//   - Optional inbox (switch in settings): replies to your comments and
+//     comments on your posts, plus received private messages.
 //   - Commenting through Tapestry's composer: "comment" (on a post) and
 //     "reply" (on a comment) open a Draft, and "send_comment" posts it.
 //
@@ -34,6 +38,12 @@ const PAGE_SIZE = 50;
 // account) that has no profile image. This is the same image as the
 // connector icon in plugin-config.json; keep the two in sync.
 const DEFAULT_AVATAR = "https://lemmy.world/pictrs/image/32afad92-0ff9-4253-9135-ab9832111af6.png";
+
+// Inbox: how many replies and private messages are requested per refresh.
+const INBOX_PAGE_SIZE = 50;
+
+// Local storage key for the logged-in account's numeric Lemmy person id.
+const PERSON_ID_KEY = "personId";
 
 // Local storage key for the cached JWT.
 const JWT_KEY = "jwt";
@@ -155,7 +165,8 @@ function escapeHtml(text) {
  * BOTH views. Supported Markdown:
  *
  *   - **bold**, __bold__, *italic*, _italic_, ***bold italic***, ~~strike~~
- *   - [label](https://...) links
+ *   - [label](https://...) links, plus plain-text links: bare https:// URLs,
+ *     <https://...> autolinks, and www. addresses
  *   - > block quotes (consecutive lines form one quote; nesting is flattened)
  *   - # headings (any level), shown as a bold paragraph
  *   - bullet lists (- * +), shown as lines starting with a bullet character;
@@ -193,11 +204,40 @@ function markdownToHtml(markdown) {
 		return protect("<code>" + escapeHtml(code) + "</code>");
 	});
 
+	// Turns one plain-text URL match into a protected link. Trailing
+	// punctuation (and an unmatched closing parenthesis) is left outside the
+	// link, so "see https://example.com." and "(https://example.com)" work.
+	function linkifyFound(found) {
+		let url = found;
+		let trailing = "";
+		while (true) {
+			const last = url.charAt(url.length - 1);
+			const unbalancedParen = (last === ")") && (url.split("(").length < url.split(")").length);
+			if (/[.,;:!?'*_~]/.test(last) || unbalancedParen) {
+				trailing = last + trailing;
+				url = url.substring(0, url.length - 1);
+			}
+			else {
+				break;
+			}
+		}
+		if (url.length === 0) {
+			return found;
+		}
+		const href = /^www\./i.test(url) ? "https://" + url : url;
+		return protect('<a href="' + href + '">' + url + "</a>") + trailing;
+	}
+
 	// Formats one run of text (no block structure): escape, then links,
 	// mentions, and emphasis.
 	function inline(raw) {
 		let h = escapeHtml(raw);
 		h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, function (match, label, url) {
+			// A label that is itself a URL is protected whole, so the plain-text
+			// link pass below cannot nest a second link inside this one.
+			if (/https?:\/\/|www\./i.test(label)) {
+				return protect('<a href="' + url + '">' + label + "</a>");
+			}
 			return protect('<a href="' + url + '">') + label + protect("</a>");
 		});
 		h = h.replace(/(^|[\s(])!([A-Za-z0-9_]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g, function (match, lead, name, host) {
@@ -205,6 +245,15 @@ function markdownToHtml(markdown) {
 		});
 		h = h.replace(/(^|[\s(])@([A-Za-z0-9_.-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g, function (match, lead, name, host) {
 			return lead + protect('<a href="https://' + host + "/u/" + name + '">@' + name + "@" + host + "</a>");
+		});
+		// Plain-text links: bare http(s):// URLs, <https://...> autolinks, and
+		// www. addresses (linked as https). Runs before emphasis so underscores
+		// and asterisks inside a URL are never treated as formatting.
+		h = h.replace(/(^|[\s(])((?:https?:\/\/|www\.)(?:(?!&lt;|&gt;|&quot;)[^\s<>"])+)/gi, function (match, lead, found) {
+			return lead + linkifyFound(found);
+		});
+		h = h.replace(/&lt;(https?:\/\/[^\s<>"]+?)&gt;/gi, function (match, url) {
+			return protect('<a href="' + url + '">' + url + "</a>");
 		});
 		h = h.replace(/\*\*\*([^*\n]+?)\*\*\*/g, "<strong><em>$1</em></strong>");
 		h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -385,6 +434,18 @@ function applyVoteActions(item, myVote) {
 }
 
 /**
+ * Applies the bookmark action to an item (a post or comment) based on whether
+ * it is currently saved on Lemmy: "bookmark" when it is not, "unbookmark" when
+ * it is. Both ids share the "keep" semantic, so Tapestry gives them the
+ * standard bookmark shortcut and position.
+ */
+function applySaveActions(item, saved) {
+	item.actions.delete("bookmark");
+	item.actions.delete("unbookmark");
+	item.actions.add(saved ? "unbookmark" : "bookmark");
+}
+
+/**
  * Builds the single annotation shown above a post: community name, score,
  * vote marker, and comment count, linking to the community page.
  */
@@ -401,6 +462,59 @@ function annotationForPost(postView) {
 		annotation.icon = community.icon;
 	}
 	return annotation;
+}
+
+// Page titles that mean Lemmy's server-side crawl of a link was blocked or
+// bounced (bot protection, consent walls, error pages) instead of reading the
+// real page. A card built from one of these shows "Access Denied" or similar.
+const BAD_EMBED_TITLE = /^(access denied|just a moment|attention required|forbidden|403|404|error|are you a (robot|human)|robot check|security check|please wait|one moment|request blocked|blocked|pardon our interruption|verifying you are human|verify you are human|you have been blocked|sorry|before you continue|-?\s*youtube$|youtube$)|access denied|captcha|cloudflare|enable javascript/i;
+
+/**
+ * Returns the YouTube video id for a URL (watch, youtu.be, shorts, embed, or
+ * live links, including m. and music. hosts), or null for any other link.
+ */
+function youtubeVideoId(url) {
+	const match = String(url || "").match(/^https?:\/\/(?:(?:www|m|music)\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i);
+	return match ? match[1] : null;
+}
+
+/**
+ * Builds the LinkAttachment card for a post's link.
+ *
+ * Lemmy fills the embed_* fields by crawling the page from the server, and
+ * that crawl is often blocked: sites answer with "Access Denied", a captcha,
+ * or a consent page, so the card would show that text. To avoid it:
+ *   - If embed_title looks like a block or error page, the card uses the
+ *     post's own title instead, and the description and thumbnail from the
+ *     same failed crawl are dropped.
+ *   - YouTube links always get a thumbnail built from the video id (a 16:9
+ *     image from YouTube's image host), because crawled YouTube data is
+ *     frequently a consent page or missing.
+ *   - The site name (the host, without "www.") is always set.
+ */
+function linkAttachmentForPost(post) {
+	const link = LinkAttachment.createWithUrl(post.url);
+	const host = (String(post.url).split("/")[2] || "").replace(/^www\./i, "");
+	const embedTitle = (post.embed_title || "").trim();
+	const crawlFailed = (embedTitle.length > 0) && BAD_EMBED_TITLE.test(embedTitle);
+
+	link.title = (embedTitle.length > 0 && !crawlFailed) ? embedTitle : post.name;
+	if (host) {
+		link.siteName = host;
+	}
+	if (post.embed_description && !crawlFailed) {
+		link.subtitle = post.embed_description;
+	}
+
+	const videoId = youtubeVideoId(post.url);
+	if (videoId) {
+		link.image = "https://i.ytimg.com/vi/" + videoId + "/mqdefault.jpg";
+		link.aspectSize = { width: 320, height: 180 };
+	}
+	else if (post.thumbnail_url && !crawlFailed) {
+		link.image = post.thumbnail_url;
+	}
+	return link;
 }
 
 /**
@@ -441,15 +555,7 @@ function itemForPostView(postView) {
 		attachments.push(media);
 	}
 	else if (post.url) {
-		const link = LinkAttachment.createWithUrl(post.url);
-		link.title = post.embed_title || post.name;
-		if (post.embed_description) {
-			link.subtitle = post.embed_description;
-		}
-		if (post.thumbnail_url) {
-			link.image = post.thumbnail_url;
-		}
-		attachments.push(link);
+		attachments.push(linkAttachmentForPost(post));
 	}
 	else if (post.thumbnail_url) {
 		attachments.push(MediaAttachment.createWithUrl(post.thumbnail_url));
@@ -468,6 +574,7 @@ function itemForPostView(postView) {
 	// Metadata values must be strings.
 	item.metadata = { kind: "post", postId: String(post.id) };
 	applyVoteActions(item, postView.my_vote || 0);
+	applySaveActions(item, postView.saved === true);
 	item.actions.add("comment");
 	// Like Mastodon and Bluesky: a different thread icon when replies exist.
 	// "thread_replies" and "thread" are the same action; only the icon differs.
@@ -555,15 +662,37 @@ function annotationForComment(commentView) {
 }
 
 /**
+ * Builds the annotation list for a comment item. Normally this is just the
+ * score annotation. Inbox items also carry a leading note (stored in
+ * item.metadata.replyNote, with a link to the post in metadata.replyUri) saying
+ * why the comment is in the timeline; it is kept whenever annotations are
+ * rebuilt, such as after a vote.
+ */
+function annotationsForComment(commentView, metadata) {
+	let annotations = [];
+	if (metadata && metadata.replyNote) {
+		const note = Annotation.createWithText(metadata.replyNote);
+		if (metadata.replyUri) {
+			note.uri = metadata.replyUri;
+		}
+		annotations.push(note);
+	}
+	annotations.push(annotationForComment(commentView));
+	return annotations;
+}
+
+/**
  * Converts one Lemmy CommentView into a Tapestry Item.
  *
  * - The comment's canonical federated URL (ap_id) is the item URI.
  * - Deleted or removed comments show a placeholder instead of their content.
  * - Metadata carries kind="comment", the comment id, and the parent post id
  *   (needed to post a reply).
- * - Actions: vote actions plus "reply".
+ * - Actions: vote actions, bookmark, and "reply".
+ * - replyNote / replyUri (optional): set only for inbox items; see
+ *   annotationsForComment().
  */
-function itemForCommentView(commentView) {
+function itemForCommentView(commentView, replyNote, replyUri) {
 	const comment = commentView.comment;
 	const creator = commentView.creator;
 
@@ -593,13 +722,134 @@ function itemForCommentView(commentView) {
 		creator.actor_id
 	);
 
-	item.annotations = [annotationForComment(commentView)];
-
 	item.metadata = { kind: "comment", commentId: String(comment.id), postId: String(comment.post_id) };
+	if (replyNote) {
+		item.metadata.replyNote = replyNote;
+		item.metadata.replyUri = replyUri || "";
+	}
+	item.annotations = annotationsForComment(commentView, item.metadata);
 	applyVoteActions(item, commentView.my_vote || 0);
+	applySaveActions(item, commentView.saved === true);
 	item.actions.add("reply");
 
 	return item;
+}
+
+// ---------------------------------------------------------------------------
+// Inbox: replies and private messages
+// ---------------------------------------------------------------------------
+
+/**
+ * Shortens text to `max` characters, adding an ellipsis when cut.
+ */
+function truncate(text, max) {
+	const value = String(text || "");
+	return (value.length > max) ? value.substring(0, max - 1) + "…" : value;
+}
+
+/**
+ * Returns the numeric Lemmy person id of the logged-in account. Used to tell
+ * received private messages from sent ones. The id is cached in local storage;
+ * if it is missing (a feed set up before the inbox existed) it is read from
+ * /api/v3/site and cached.
+ */
+async function getPersonId() {
+	const cached = getItem(PERSON_ID_KEY);
+	if (cached) {
+		return parseInt(cached);
+	}
+	const json = await authed(function (jwt) {
+		return fetch.get(baseUrl() + "/api/v3/site", { headers: authHeaders(jwt) });
+	});
+	const id = json.my_user.local_user_view.person.id;
+	setItem(PERSON_ID_KEY, String(id));
+	return id;
+}
+
+/**
+ * Builds the note shown above an inbox reply. Lemmy puts two kinds of comment
+ * in the replies list: answers to one of the user's comments (the comment is
+ * nested, path depth above 0) and top-level comments on one of the user's
+ * posts. The note says which, followed by the post title.
+ */
+function replyNoteForView(replyView) {
+	const isReplyToComment = commentDepth(replyView.comment.path) > 0;
+	return (isReplyToComment ? "Reply to your comment" : "Comment on your post")
+		+ " · " + truncate(replyView.post.name, 50);
+}
+
+/**
+ * Converts one Lemmy PrivateMessageView into a Tapestry Item.
+ * The Markdown content (with images pulled out as attachments) becomes the
+ * body, and an annotation marks it as a private message. Metadata records
+ * kind="message"; messages have no actions.
+ */
+function itemForPrivateMessageView(messageView) {
+	const message = messageView.private_message;
+	const creator = messageView.creator;
+
+	const item = Item.createWithUriDate(message.ap_id, parseDate(message.published));
+
+	if (message.deleted) {
+		item.body = "<p><em>[deleted]</em></p>";
+	}
+	else {
+		const parts = extractMarkdownImages(message.content);
+		item.body = markdownToHtml(parts.text);
+		const images = attachmentsForImages(parts.images, null);
+		if (images.length > 0) {
+			item.attachments = images;
+		}
+	}
+
+	const creatorHost = (creator.actor_id || "").split("/")[2] || "";
+	item.author = Identity.create(
+		creator.display_name || creator.name,
+		creator.name + (creatorHost ? "@" + creatorHost : ""),
+		creator.avatar || DEFAULT_AVATAR,
+		creator.actor_id
+	);
+
+	item.annotations = [Annotation.createWithText("Private message to you")];
+	item.metadata = { kind: "message", messageId: String(message.id) };
+	return item;
+}
+
+/**
+ * Loads the inbox: replies (to the user's comments and posts) and received
+ * private messages, newest 50 of each. Replies reuse the comment item builder
+ * so voting, replying, and bookmarking work on them, with a leading note
+ * explaining why they are in the timeline. Private messages sent BY the user
+ * are skipped. Returns an Array of Items; throws on failure.
+ */
+async function loadInbox() {
+	let results = [];
+
+	const replies = await authed(function (jwt) {
+		return fetch.get(baseUrl() + "/api/v3/user/replies", {
+			params: { unread_only: "false", sort: "New", limit: String(INBOX_PAGE_SIZE), page: "1" },
+			headers: authHeaders(jwt)
+		});
+	});
+	for (const replyView of (replies.replies || [])) {
+		results.push(itemForCommentView(replyView, replyNoteForView(replyView), replyView.post.ap_id));
+	}
+
+	const personId = await getPersonId();
+	const messages = await authed(function (jwt) {
+		return fetch.get(baseUrl() + "/api/v3/private_message/list", {
+			params: { unread_only: "false", limit: String(INBOX_PAGE_SIZE), page: "1" },
+			headers: authHeaders(jwt)
+		});
+	});
+	for (const messageView of (messages.private_messages || [])) {
+		if (messageView.private_message.creator_id === personId) {
+			continue;
+		}
+		results.push(itemForPrivateMessageView(messageView));
+	}
+
+	return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -614,11 +864,13 @@ function itemForCommentView(commentView) {
  */
 async function verify() {
 	setItem(JWT_KEY, null);
+	setItem(PERSON_ID_KEY, null);
 	await login();
 	const json = await authed(function (jwt) {
 		return fetch.get(baseUrl() + "/api/v3/site", { headers: authHeaders(jwt) });
 	});
 	const person = json.my_user.local_user_view.person;
+	setItem(PERSON_ID_KEY, String(person.id));
 	const host = baseUrl().split("/")[2] || "";
 	const fullName = "@" + person.name + "@" + host;
 	return {
@@ -633,8 +885,9 @@ async function verify() {
  *
  * Requests the "Subscribed" feed page by page, sequentially, up to the
  * "pages" setting, stopping early when Lemmy returns a short page. NSFW posts
- * are dropped unless the "Show NSFW posts" switch is on. Returns the Array of
- * Items; throws on failure.
+ * are dropped unless the "Show NSFW posts" switch is on. When the "Include
+ * replies & private messages" switch is on, inbox items are appended. Returns
+ * the Array of Items; throws on failure.
  */
 async function load() {
 	const maxPages = parseInt(pages) || 1;
@@ -662,6 +915,10 @@ async function load() {
 		}
 	}
 
+	if (showInbox === "on") {
+		results = results.concat(await loadInbox());
+	}
+
 	return results;
 }
 
@@ -687,6 +944,34 @@ async function voteComment(commentId, score) {
 	const json = await authed(function (jwt) {
 		return fetch.post(baseUrl() + "/api/v3/comment/like", {
 			json: { comment_id: parseInt(commentId), score: score },
+			headers: authHeaders(jwt)
+		});
+	});
+	return json.comment_view;
+}
+
+/**
+ * Saves (bookmarks) or unsaves a post. Returns the updated PostView.
+ * Lemmy's save endpoints use HTTP PUT; a POST gets a 404.
+ */
+async function savePost(postId, save) {
+	const json = await authed(function (jwt) {
+		return fetch.put(baseUrl() + "/api/v3/post/save", {
+			json: { post_id: parseInt(postId), save: save },
+			headers: authHeaders(jwt)
+		});
+	});
+	return json.post_view;
+}
+
+/**
+ * Saves (bookmarks) or unsaves a comment. Returns the updated CommentView.
+ * Lemmy's save endpoints use HTTP PUT; a POST gets a 404.
+ */
+async function saveComment(commentId, save) {
+	const json = await authed(function (jwt) {
+		return fetch.put(baseUrl() + "/api/v3/comment/save", {
+			json: { comment_id: parseInt(commentId), save: save },
 			headers: authHeaders(jwt)
 		});
 	});
@@ -792,6 +1077,8 @@ function draftForReply(item) {
  *   (told apart by item.metadata.kind). The vote is sent, then the item's
  *   annotation and actions are rebuilt from Lemmy's response and the updated
  *   item is returned.
+ * - "bookmark" / "unbookmark": saves or unsaves a post or comment on Lemmy
+ *   and swaps the action to match the saved state.
  * - "comment" (on a post) / "reply" (on a comment): returns a Draft, which
  *   opens the composer.
  * - "thread" / "thread_replies": context action on a post (the two differ
@@ -809,7 +1096,7 @@ async function performAction(actionId, target, actionValue) {
 
 		if (item.metadata.kind === "comment") {
 			const commentView = await voteComment(item.metadata.commentId, score);
-			item.annotations = [annotationForComment(commentView)];
+			item.annotations = annotationsForComment(commentView, item.metadata);
 			applyVoteActions(item, commentView.my_vote || 0);
 			return item;
 		}
@@ -817,6 +1104,19 @@ async function performAction(actionId, target, actionValue) {
 		const postView = await votePost(item.metadata.postId, score);
 		item.annotations = [annotationForPost(postView)];
 		applyVoteActions(item, postView.my_vote || 0);
+		return item;
+	}
+	else if (actionId === "bookmark" || actionId === "unbookmark") {
+		const item = target;
+		const save = (actionId === "bookmark");
+		if (item.metadata.kind === "comment") {
+			const commentView = await saveComment(item.metadata.commentId, save);
+			applySaveActions(item, commentView.saved === true);
+		}
+		else {
+			const postView = await savePost(item.metadata.postId, save);
+			applySaveActions(item, postView.saved === true);
+		}
 		return item;
 	}
 	else if (actionId === "comment" || actionId === "reply") {

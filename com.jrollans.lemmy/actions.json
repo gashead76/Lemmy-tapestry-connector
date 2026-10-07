@@ -18,6 +18,18 @@
 			"priority": "secondary"
 		},
 		{
+			"id": "bookmark",
+			"name": "Bookmark",
+			"icon": "tapestry.bookmark",
+			"semantic": "keep"
+		},
+		{
+			"id": "unbookmark",
+			"name": "Remove Bookmark",
+			"icon": "tapestry.bookmark.fill",
+			"semantic": "keep"
+		},
+		{
 			"id": "comment",
 			"name": "Comment",
 			"icon": "arrow.turn.up.left",
