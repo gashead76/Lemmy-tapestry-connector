@@ -8,6 +8,11 @@
 //   - Upvote, downvote, and remove-vote actions on each post.
 //   - Browsing comments: a "thread" context action on each post loads the
 //     whole comment tree as a depth-first list of items.
+//   - Nested threads: every comment has its own "thread" action that opens
+//     just the replies to that comment. Inbox replies also show the post they
+//     belong to above the comment. Private messages open the conversation
+//     with that person (Lemmy has no message threads; this is every message
+//     exchanged with them, oldest first).
 //   - Voting on comments, and replying to comments, using the same action ids
 //     as posts. Items carry metadata.kind ("post" or "comment") so
 //     performAction knows which Lemmy endpoint to call.
@@ -55,6 +60,9 @@ const COMMENT_MAX_LENGTH = 10000;
 // (so a thread loads at most COMMENT_PAGE_SIZE * MAX_COMMENT_PAGES comments).
 const COMMENT_PAGE_SIZE = 50;
 const MAX_COMMENT_PAGES = 10;
+
+// Most pages of private messages read when building a conversation view.
+const MAX_MESSAGE_PAGES = 6;
 
 // Deepest reply level requested from Lemmy.
 const MAX_COMMENT_DEPTH = 10;
@@ -446,6 +454,17 @@ function applySaveActions(item, saved) {
 }
 
 /**
+ * Applies the thread action to an item. Both ids open the same thread; they
+ * differ only in icon, so Tapestry can show the "has replies" icon when
+ * `hasReplies` is true (see actions.json).
+ */
+function applyThreadAction(item, hasReplies) {
+	item.actions.delete("thread");
+	item.actions.delete("thread_replies");
+	item.actions.add(hasReplies ? "thread_replies" : "thread");
+}
+
+/**
  * Builds the single annotation shown above a post: community name, score,
  * vote marker, and comment count, linking to the community page.
  */
@@ -577,8 +596,7 @@ function itemForPostView(postView) {
 	applySaveActions(item, postView.saved === true);
 	item.actions.add("comment");
 	// Like Mastodon and Bluesky: a different thread icon when replies exist.
-	// "thread_replies" and "thread" are the same action; only the icon differs.
-	item.actions.add((postView.counts.comments > 0) ? "thread_replies" : "thread");
+	applyThreadAction(item, postView.counts.comments > 0);
 
 	return item;
 }
@@ -688,7 +706,7 @@ function annotationsForComment(commentView, metadata) {
  * - Deleted or removed comments show a placeholder instead of their content.
  * - Metadata carries kind="comment", the comment id, and the parent post id
  *   (needed to post a reply).
- * - Actions: vote actions, bookmark, and "reply".
+ * - Actions: vote actions, bookmark, "reply", and "thread" (its replies).
  * - replyNote / replyUri (optional): set only for inbox items; see
  *   annotationsForComment().
  */
@@ -726,11 +744,17 @@ function itemForCommentView(commentView, replyNote, replyUri) {
 	if (replyNote) {
 		item.metadata.replyNote = replyNote;
 		item.metadata.replyUri = replyUri || "";
+		// The comment this one answers ("0" when it is top-level, i.e. a
+		// comment on a post), used to show the original comment in its thread.
+		item.metadata.parentCommentId = commentParentId(comment.path);
 	}
 	item.annotations = annotationsForComment(commentView, item.metadata);
 	applyVoteActions(item, commentView.my_vote || 0);
 	applySaveActions(item, commentView.saved === true);
 	item.actions.add("reply");
+	// Every comment can open its own sub-thread; the replies icon shows when
+	// Lemmy reports child comments.
+	applyThreadAction(item, (commentView.counts.child_count || 0) > 0);
 
 	return item;
 }
@@ -782,9 +806,11 @@ function replyNoteForView(replyView) {
  * Converts one Lemmy PrivateMessageView into a Tapestry Item.
  * The Markdown content (with images pulled out as attachments) becomes the
  * body, and an annotation marks it as a private message. Metadata records
- * kind="message"; messages have no actions.
+ * kind="message" and the id of the other person in the conversation, and a
+ * "thread" action opens that conversation. A message sent BY the logged-in
+ * account (personId) is annotated as sent instead of received.
  */
-function itemForPrivateMessageView(messageView) {
+function itemForPrivateMessageView(messageView, personId) {
 	const message = messageView.private_message;
 	const creator = messageView.creator;
 
@@ -810,8 +836,17 @@ function itemForPrivateMessageView(messageView) {
 		creator.actor_id
 	);
 
-	item.annotations = [Annotation.createWithText("Private message to you")];
-	item.metadata = { kind: "message", messageId: String(message.id) };
+	const sentByMe = (message.creator_id === personId);
+	if (sentByMe) {
+		const recipient = messageView.recipient || {};
+		item.annotations = [Annotation.createWithText("You sent this to " + (recipient.display_name || recipient.name || "them"))];
+	}
+	else {
+		item.annotations = [Annotation.createWithText("Private message to you")];
+	}
+	const otherPersonId = sentByMe ? message.recipient_id : message.creator_id;
+	item.metadata = { kind: "message", messageId: String(message.id), otherPersonId: String(otherPersonId) };
+	item.actions.add("thread");
 	return item;
 }
 
@@ -846,7 +881,7 @@ async function loadInbox() {
 		if (messageView.private_message.creator_id === personId) {
 			continue;
 		}
-		results.push(itemForPrivateMessageView(messageView));
+		results.push(itemForPrivateMessageView(messageView, personId));
 	}
 
 	return results;
@@ -881,16 +916,31 @@ async function verify() {
 }
 
 /**
+ * Reads the "Minimum post points" setting. Returns the threshold as a whole
+ * number (negative values are allowed), or null when the setting is empty or
+ * not a number, which means "show every post".
+ */
+function minimumPoints() {
+	if (typeof minPoints === "undefined") {
+		return null;
+	}
+	const value = parseInt(String(minPoints).trim(), 10);
+	return isNaN(value) ? null : value;
+}
+
+/**
  * Called by Tapestry to refresh the timeline.
  *
  * Requests the "Subscribed" feed page by page, sequentially, up to the
  * "pages" setting, stopping early when Lemmy returns a short page. NSFW posts
- * are dropped unless the "Show NSFW posts" switch is on. When the "Include
+ * are dropped unless the "Show NSFW posts" switch is on, and posts scoring
+ * below the "Minimum post points" setting are dropped. When the "Include
  * replies & private messages" switch is on, inbox items are appended. Returns
  * the Array of Items; throws on failure.
  */
 async function load() {
 	const maxPages = parseInt(pages) || 1;
+	const threshold = minimumPoints();
 	let results = [];
 
 	for (let page = 1; page <= maxPages; page++) {
@@ -905,6 +955,11 @@ async function load() {
 		for (const postView of postViews) {
 			const isNsfw = postView.post.nsfw || (postView.community && postView.community.nsfw);
 			if (isNsfw && showNsfw !== "on") {
+				continue;
+			}
+			// Skip posts below the user's minimum score. Inbox items are not
+			// filtered, and the short-page check below uses the unfiltered count.
+			if (threshold !== null && postView.counts.score < threshold) {
 				continue;
 			}
 			results.push(itemForPostView(postView));
@@ -1071,6 +1126,126 @@ function draftForReply(item) {
 }
 
 /**
+ * Fetches one post from Lemmy by id and converts it to an Item, used to show
+ * the post above an inbox reply.
+ */
+async function loadPostItem(postId) {
+	const json = await authed(function (jwt) {
+		return fetch.get(baseUrl() + "/api/v3/post", {
+			params: { id: String(postId) },
+			headers: authHeaders(jwt)
+		});
+	});
+	return itemForPostView(json.post_view);
+}
+
+/**
+ * Fetches one comment from Lemmy by id and converts it to an Item, used to
+ * show the user's own comment above an inbox reply to it.
+ */
+async function loadCommentItem(commentId) {
+	const json = await authed(function (jwt) {
+		return fetch.get(baseUrl() + "/api/v3/comment", {
+			params: { id: String(commentId) },
+			headers: authHeaders(jwt)
+		});
+	});
+	return itemForCommentView(json.comment_view);
+}
+
+/**
+ * Loads the sub-thread for one comment (the "thread" action on a comment).
+ *
+ * Fetches every descendant of the comment (parent_id), page by page, drops the
+ * comment itself if Lemmy includes it, and orders the rest depth-first. The
+ * result starts with the tapped comment item. Inbox replies (items with a
+ * reply note) get context placed first, so the thread reads: the post, then
+ * the comment the reply answers (your own comment; skipped for a top-level
+ * comment on your post), then the reply, then the replies to it.
+ */
+async function loadCommentThread(commentItem) {
+	const commentId = commentItem.metadata.commentId;
+	let commentViews = [];
+
+	for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+		const json = await authed(function (jwt) {
+			return fetch.get(baseUrl() + "/api/v3/comment/list", {
+				params: {
+					parent_id: commentId,
+					type_: "All",
+					sort: "Top",
+					limit: String(COMMENT_PAGE_SIZE),
+					page: String(page)
+				},
+				headers: authHeaders(jwt)
+			});
+		});
+		const views = json.comments || [];
+		commentViews = commentViews.concat(views);
+		if (views.length < COMMENT_PAGE_SIZE) {
+			break;
+		}
+	}
+
+	// Lemmy may include the parent comment in its own descendant list.
+	commentViews = commentViews.filter(function (view) {
+		return String(view.comment.id) !== String(commentId);
+	});
+
+	let result = [commentItem].concat(orderCommentTree(commentViews).map(function (view) {
+		return itemForCommentView(view);
+	}));
+
+	if (commentItem.metadata.replyNote) {
+		const parentId = commentItem.metadata.parentCommentId;
+		if (parentId && parentId !== "0") {
+			result.unshift(await loadCommentItem(parentId));
+		}
+		result.unshift(await loadPostItem(commentItem.metadata.postId));
+	}
+	return result;
+}
+
+/**
+ * Loads the conversation for a private message (the "thread" action on a
+ * message). Lemmy has no message threads, so this reads the account's private
+ * messages page by page and keeps those exchanged with the other person in
+ * either direction, oldest first, so it reads like a chat.
+ */
+async function loadConversation(messageItem) {
+	const otherId = parseInt(messageItem.metadata.otherPersonId);
+	const personId = await getPersonId();
+	let messageViews = [];
+
+	for (let page = 1; page <= MAX_MESSAGE_PAGES; page++) {
+		const json = await authed(function (jwt) {
+			return fetch.get(baseUrl() + "/api/v3/private_message/list", {
+				params: { unread_only: "false", limit: String(INBOX_PAGE_SIZE), page: String(page) },
+				headers: authHeaders(jwt)
+			});
+		});
+		const views = json.private_messages || [];
+		messageViews = messageViews.concat(views);
+		if (views.length < INBOX_PAGE_SIZE) {
+			break;
+		}
+	}
+
+	const conversation = messageViews.filter(function (view) {
+		const message = view.private_message;
+		return (message.creator_id === otherId && message.recipient_id === personId)
+			|| (message.creator_id === personId && message.recipient_id === otherId);
+	});
+	conversation.sort(function (a, b) {
+		return parseDate(a.private_message.published) - parseDate(b.private_message.published);
+	});
+
+	return conversation.map(function (view) {
+		return itemForPrivateMessageView(view, personId);
+	});
+}
+
+/**
  * Called by Tapestry when the user taps an action.
  *
  * - "upvote" / "downvote" / "clear_vote": target is a post or comment Item
@@ -1081,8 +1256,10 @@ function draftForReply(item) {
  *   and swaps the action to match the saved state.
  * - "comment" (on a post) / "reply" (on a comment): returns a Draft, which
  *   opens the composer.
- * - "thread" / "thread_replies": context action on a post (the two differ
- *   only in icon: replies exist or not); returns the post followed by its
+ * - "thread" / "thread_replies": context action (the two differ only in icon:
+ *   replies exist or not). On a post it loads the whole comment tree; on a
+ *   comment, that comment's replies (with the post first for inbox replies);
+ *   on a private message, the conversation with that person; returns the post followed by its
  *   comment tree.
  * - "send_comment": target is the edited Draft. Posts the comment or reply
  *   and returns nothing, which closes the composer.
@@ -1123,6 +1300,13 @@ async function performAction(actionId, target, actionValue) {
 		return draftForReply(target);
 	}
 	else if (actionId === "thread" || actionId === "thread_replies") {
+		const kind = target.metadata.kind;
+		if (kind === "comment") {
+			return await loadCommentThread(target);
+		}
+		if (kind === "message") {
+			return await loadConversation(target);
+		}
 		return await loadThread(target);
 	}
 	else if (actionId === "send_comment") {

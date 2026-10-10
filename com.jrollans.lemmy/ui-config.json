@@ -27,6 +27,13 @@
 			"choices": "1,2,3,5"
 		},
 		{
+			"name": "minPoints",
+			"type": "text",
+			"prompt": "Minimum post points",
+			"placeholder": "0 or higher hides downvoted posts",
+			"value": "0"
+		},
+		{
 			"name": "showNsfw",
 			"type": "switch",
 			"prompt": "Show NSFW posts",

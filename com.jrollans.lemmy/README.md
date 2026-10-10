@@ -6,4 +6,6 @@ Actions on posts and comments: Upvote, Downvote, Remove Vote, Bookmark (Lemmy's 
 
 Turn on "Include replies & private messages" to also bring in answers to your comments, comments on your posts, and private messages sent to you. Replies are marked with a note saying what they are replying to.
 
+Minimum post points allows you to filter out downvoted posts as well as choosing a minimum point value for every post loaded. So if you only want to see posts with a score of 5, set it to that. The default it 0 and will so all posts that are not downvoted. Set it to a negative number to see downvoted posts as well.
+
 Requires Tapestry 2.0 or later.
