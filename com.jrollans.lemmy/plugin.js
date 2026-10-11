@@ -16,6 +16,8 @@
 //   - Voting on comments, and replying to comments, using the same action ids
 //     as posts. Items carry metadata.kind ("post" or "comment") so
 //     performAction knows which Lemmy endpoint to call.
+//   - Spoilers: "::: spoiler" blocks in posts and comments put the item behind
+//     a content warning (switch in settings).
 //   - Bookmarking (Lemmy "save") of posts and comments, with the standard
 //     Tapestry "keep" gesture.
 //   - Optional inbox (switch in settings): replies to your comments and
@@ -537,6 +539,43 @@ function linkAttachmentForPost(post) {
 }
 
 /**
+ * Builds a content warning for Lemmy spoiler blocks in a Markdown string, or
+ * returns null when there is nothing to hide.
+ *
+ * Lemmy spoilers are written as "::: spoiler Title", then the hidden text,
+ * then ":::". Tapestry has no spoiler feature, so the closest tool is the
+ * item's contentWarning, which hides the content until tapped. A warning
+ * covers the WHOLE item, not just the spoiler block. The warning reads
+ * "Spoiler: Title"; several blocks have their titles joined with " / ", and a
+ * block with no title gives just "Spoiler".
+ *
+ * Returns null when the "Hide spoilers behind a warning" switch is off.
+ */
+function spoilerWarning(markdown) {
+	if (typeof hideSpoilers !== "undefined" && hideSpoilers === "off") {
+		return null;
+	}
+	if (!markdown) {
+		return null;
+	}
+	const pattern = /^[ \t]*:::[ \t]*spoiler[ \t]*(.*)$/gim;
+	let titles = [];
+	let found = false;
+	let match;
+	while ((match = pattern.exec(markdown)) !== null) {
+		found = true;
+		const title = match[1].trim();
+		if (title.length > 0 && titles.indexOf(title) === -1) {
+			titles.push(title);
+		}
+	}
+	if (!found) {
+		return null;
+	}
+	return (titles.length > 0) ? truncate("Spoiler: " + titles.join(" / "), 100) : "Spoiler";
+}
+
+/**
  * Converts one Lemmy PostView into a Tapestry Item.
  *
  * - Title and Markdown body become the item title and HTML body.
@@ -584,8 +623,17 @@ function itemForPostView(postView) {
 		item.attachments = attachments;
 	}
 
+	// Content warning: NSFW and/or spoiler, combined when both apply.
+	let warnings = [];
 	if (post.nsfw || (postView.community && postView.community.nsfw)) {
-		item.contentWarning = "NSFW";
+		warnings.push("NSFW");
+	}
+	const spoiler = spoilerWarning(post.body);
+	if (spoiler) {
+		warnings.push(spoiler);
+	}
+	if (warnings.length > 0) {
+		item.contentWarning = warnings.join(" · ");
 	}
 
 	item.annotations = [annotationForPost(postView)];
@@ -729,6 +777,10 @@ function itemForCommentView(commentView, replyNote, replyUri) {
 		const images = attachmentsForImages(contentParts.images, null);
 		if (images.length > 0) {
 			item.attachments = images;
+		}
+		const spoiler = spoilerWarning(comment.content);
+		if (spoiler) {
+			item.contentWarning = spoiler;
 		}
 	}
 

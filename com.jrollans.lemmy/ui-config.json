@@ -44,6 +44,12 @@
 			"type": "switch",
 			"prompt": "Include replies & private messages",
 			"value": "off"
+		},
+		{
+			"name": "hideSpoilers",
+			"type": "switch",
+			"prompt": "Hide spoilers behind a warning",
+			"value": "on"
 		}
 	]
 }
