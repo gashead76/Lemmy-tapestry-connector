@@ -52,8 +52,13 @@ const INBOX_PAGE_SIZE = 50;
 // Local storage key for the logged-in account's numeric Lemmy person id.
 const PERSON_ID_KEY = "personId";
 
-// Local storage key for the cached JWT.
+// Local storage keys for the cached JWT and the time it was obtained.
 const JWT_KEY = "jwt";
+const JWT_TIME_KEY = "jwtTime";
+
+// A cached JWT older than this is replaced with a fresh login before use, so a
+// token that has gone stale after a day or two is never sent.
+const JWT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 // Lemmy's maximum comment length, used for the composer's character counter.
 const COMMENT_MAX_LENGTH = 10000;
@@ -110,15 +115,19 @@ async function login() {
 		throw new Error("Lemmy login did not return a token. Check credentials; accounts with 2FA are not supported.");
 	}
 	setItem(JWT_KEY, json.jwt);
+	setItem(JWT_TIME_KEY, String(Date.now()));
 	return json.jwt;
 }
 
 /**
- * Returns a usable JWT: the cached one if present, otherwise a fresh login.
+ * Returns a usable JWT: the cached one if it is present and was obtained less
+ * than JWT_MAX_AGE_MS ago, otherwise a fresh login. A token with no recorded
+ * time (cached by an older version of this connector) counts as too old.
  */
 async function getJwt() {
 	const cached = getItem(JWT_KEY);
-	if (cached) {
+	const obtained = parseInt(getItem(JWT_TIME_KEY) || "0", 10);
+	if (cached && obtained > 0 && (Date.now() - obtained) < JWT_MAX_AGE_MS) {
 		return cached;
 	}
 	return await login();
@@ -139,12 +148,17 @@ async function authed(makeRequest) {
 		return await makeRequest(jwt).json();
 	}
 	catch (error) {
-		const retryable = (error.name === "HTTPError") && (error.status === 400 || error.status === 401);
+		// Lemmy reports a bad or expired token as HTTP 400 or 401 (some versions
+		// 403), with "not_logged_in" in the error text. Either signal retries.
+		const errorText = String(error.userMessage || "") + " " + String(error.message || "");
+		const retryable = (error.name === "HTTPError")
+			&& ([400, 401, 403].indexOf(error.status) !== -1 || /not_logged_in|incorrect_login|expired/i.test(errorText));
 		if (!retryable) {
 			throw error;
 		}
-		console.log("Request failed with " + error.status + ", logging in again and retrying once");
+		console.log("Request failed with " + error.status + " (" + errorText.trim() + "), logging in again and retrying once");
 		setItem(JWT_KEY, null);
+		setItem(JWT_TIME_KEY, null);
 		jwt = await login();
 		return await makeRequest(jwt).json();
 	}
@@ -951,6 +965,7 @@ async function loadInbox() {
  */
 async function verify() {
 	setItem(JWT_KEY, null);
+	setItem(JWT_TIME_KEY, null);
 	setItem(PERSON_ID_KEY, null);
 	await login();
 	const json = await authed(function (jwt) {
